@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>HTML5 & Go Complete Game</title>
+    <style>
+        body { background-color: #1a1a1a; color: white; font-family: sans-serif; text-align: center; margin-top: 30px; }
+        canvas { background-color: #6495ED; border: 4px solid #fff; display: block; margin: 0 auto; }
+        .hint { margin-top: 15px; color: #888; }
+    </style>
+</head>
+<body>
+
+    <h1>Go & JS Platformer (Complete)</h1>
+    <canvas id="gameCanvas" width="640" height="480"></canvas>
+    <div class="hint">← / → キー：移動 ｜ スペースキー：ジャンプ ｜ 画面クリック：シーン切替</div>
+
+<script>
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+
+let currentScene = "title"; // title, game, gameover, clear
+const gravity = 0.6;
+const jumpSpeed = -13;
+
+let player = { x: 80, y: 200, width: 30, height: 40, vx: 0, vy: 0, isGround: false };
+let blocks = [];
+let enemies = [];
+let boss = null;
+let keys = {};
+let bossJumpTimer = 0;
+
+window.addEventListener("keydown", e => keys[e.code] = true);
+window.addEventListener("keyup", e => keys[e.code] = false);
+
+canvas.addEventListener("click", () => {
+    if (currentScene === "title") fetchStageData();
+    else if (currentScene === "gameover" || currentScene === "clear") currentScene = "title";
+});
+
+function fetchStageData() {
+    fetch("http://localhost:8080/api/stage")
+        .then(res => res.json())
+        .then(data => {
+            blocks = data.blocks;
+            enemies = []; boss = null;
+            
+            data.enemies.forEach(e => {
+                // Goの左下原点をブラウザの左上原点にマッピング変換
+                if (e.type === "boss") {
+                    boss = { x: 500, y: canvas.height - e.y - 80, width: 60, height: 80, hp: 3, vx: -2, isAngry: false };
+                } else {
+                    enemies.push({ x: e.x, y: canvas.height - e.y - 30, width: 30, height: 30, vx: e.type==="goomba"?-1.5:-1, type: e.type, initialX: e.x });
+                }
+            });
+            player = { x: 80, y: 200, width: 30, height: 40, vx: 0, vy: 0, isGround: false };
+            currentScene = "game";
+        })
+        .catch(() => alert("Goサーバー(localhost:8080)が起動していません！"));
+}
+
+function sendScore() {
+    fetch("http://localhost:8080/api/clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ player_name: "HTML5_Browser", score: 1500 })
+    });
+}
+
+function update() {
+    if (currentScene !== "game") return;
+
+    // プレイヤー移動・物理
+    if (keys["ArrowLeft"]) player.x -= 4;
+    if (keys["ArrowRight"]) player.x += 4;
+    player.vy += gravity;
+    player.y += player.vy;
+
+    // 床・ブロックの衝突判定
+    let groundY = canvas.height - 40 - player.height;
+    if (player.y >= groundY) { player.y = groundY; player.vy = 0; player.isGround = true; }
+    
+    blocks.forEach(b => {
+        let bY = canvas.height - b.y - 40;
+        let blockObj = { x: b.x, y: bY, width: 40, height: 40 };
+        if (checkCollision(player, blockObj)) {
+            if (player.vy > 0 && player.y + player.height - player.vy <= bY + 10) { // 上から乗る
+                player.y = bY - player.height; player.vy = 0; player.isGround = true;
+            }
+        }
+    });
+
+    if (keys["Space"] && player.isGround) { player.vy = jumpSpeed; player.isGround = false; }
+
+    // 雑魚敵のAI挙動
+    enemies.forEach((e, idx) => {
+        e.x += e.vx;
+        if (e.type === "turtle" && (e.x < e.initialX - 60 || e.x > e.initialX + 60)) e.vx *= -1; // 往復
+        if (e.type === "jumper" && Math.random() < 0.01 && e.y >= canvas.height - 70) e.vy = -10; // ランダム跳ね
+        
+        if (e.vy) { e.vy += gravity; e.y += e.vy; if(e.y >= canvas.height-70){ e.y = canvas.height-70; e.vy = 0; } }
+
+        if (checkCollision(player, e)) {
+            if (player.vy > 0 && player.y + player.height <= e.y + 15) {
+                player.vy = jumpSpeed / 1.5; enemies.splice(idx, 1); // 踏みつけ撃破
+            } else { currentScene = "gameover"; }
+        }
+    });
+
+    // ボスのAI挙動（怒りモード含む）
+    if (boss) {
+        boss.x += boss.vx;
+        if (boss.x < 300 || boss.x > canvas.width - boss.width) boss.vx *= -1;
+
+        if (boss.isAngry) {
+            bossJumpTimer++;
+            if (bossJumpTimer % 90 === 0) boss.vy = -14; // 高頻度大ジャンプ
+        }
+        if (boss.vy !== undefined) {
+            boss.vy += gravity; boss.y += boss.vy;
+            if (boss.y >= canvas.height - 40 - boss.height) { boss.y = canvas.height - 40 - boss.height; boss.vy = 0; }
+        } else { boss.vy = 0; }
+
+        if (checkCollision(player, boss)) {
+            if (player.vy > 0 && player.y + player.height <= boss.y + 25) {
+                player.vy = jumpSpeed;
+                boss.hp--;
+                if (boss.hp === 1 && !boss.isAngry) { boss.isAngry = true; boss.vx *= 2; } // 怒り加速
+                if (boss.hp <= 0) { boss = null; currentScene = "clear"; sendScore(); }
+            } else { currentScene = "gameover"; }
+        }
+    }
+}
+
+function checkCollision(r1, r2) {
+    return r1.x < r2.x + r2.width && r1.x + r1.width > r2.x && r1.y < r2.y + r2.height && r1.y + r1.height > r2.y;
+}
+
+function render() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (currentScene === "title") {
+        ctx.fillStyle = "black"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "white"; ctx.font = "30px sans-serif"; ctx.fillText("GO & JS MARIO (HTML5)", 150, 220);
+        ctx.font = "20px sans-serif"; ctx.fillText("CLICK TO START", 240, 280);
+    } else if (currentScene === "game") {
+        ctx.fillStyle = "#228B22"; ctx.fillRect(0, canvas.height - 40, canvas.width, 40); // 地面
+        ctx.fillStyle = "#D2691E"; blocks.forEach(b => ctx.fillRect(b.x, canvas.height - b.y - 40, 40, 40)); // ブロック
+        
+        enemies.forEach(e => { // 雑魚
+            ctx.fillStyle = e.type === "goomba" ? "#8B4513" : e.type === "turtle" ? "#006400" : "#4B0082";
+            ctx.fillRect(e.x, e.y, e.width, e.height);
+        });
+
+        if (boss) { // ボス
+            ctx.fillStyle = boss.isAngry ? "red" : "orange"; ctx.fillRect(boss.x, boss.y, boss.width, boss.height);
+            ctx.fillStyle = "black"; ctx.fillRect(boss.x, boss.y - 15, boss.width, 6);
+            ctx.fillStyle = "green"; ctx.fillRect(boss.x, boss.y - 15, boss.width * (boss.hp / 3), 6);
+        }
+        ctx.fillStyle = "red"; ctx.fillRect(player.x, player.y, player.width, player.height); // プレイヤー
+    } else if (currentScene === "gameover") {
+        ctx.fillStyle = "black"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "red"; ctx.font = "40px sans-serif"; ctx.fillText("GAME OVER", 200, 240);
+    } else if (currentScene === "clear") {
+        ctx.fillStyle = "blue"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "yellow"; ctx.font = "40px sans-serif"; ctx.fillText("STAGE CLEAR!", 190, 240);
+    }
+}
+
+function loop() { update(); render(); requestAnimationFrame(loop); }
+loop();
+</script>
+</body>
+</html>
